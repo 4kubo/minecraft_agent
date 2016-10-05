@@ -156,7 +156,6 @@ class Agent():
             next_state = np.append(state[1:, :, :, :], observation, axis=0)
         elif self.dimention is 2:
             observation = observation.reshape(self.video_width, self.video_height, 1)
-            print state.shape, observation.shape
             next_state = np.append(state[:, :, 1:], observation, axis=2)
 
         # Clip all positive rewards at 1 and all negative rewards at -1, leaving 0 rewards unchanged

@@ -6,6 +6,7 @@ import datetime
 import json
 import numpy as np
 from PIL import Image
+import cv2
 sys.path.append('/home/amamori/.local/lib/malmo/Malmo-0.17.0-Linux-Ubuntu-14.04-64bit/Python_Examples')
 
 from my_agent import Agent
@@ -16,6 +17,9 @@ DIMENTION = 2
 
 
 def preprocess(observation, dimention):
+    print '        hey              k'
+    cv2.imshow('observation', np.array(Image.frombytes('RGB', (VIDEO_WIDTH, VIDEO_HEIGHT), str(observation))))
+    print cv2.waitKey(100)
     if dimention is 3:
         observation = np.array(Image.frombytes('RGB', (VIDEO_WIDTH, VIDEO_HEIGHT), str(observation)))
         return observation.reshape(VIDEO_WIDTH, VIDEO_HEIGHT, 3)
@@ -66,13 +70,19 @@ def GetMissionXML():
     </Mission>'''
 
 # Variety of strategies for dealing with loss of motion:
+# commandSequences=[
+#     "jump 1; move 1; wait 1; jump 0; move 1; wait 2",   # attempt to jump over obstacle
+#     "turn 0.5; wait 1; turn 0; move 1; wait 2",         # turn right a little
+#     "turn -0.5; wait 1; turn 0; move 1; wait 2",        # turn left a little
+#     "move 0; attack 1; wait 5; pitch 0.5; wait 1; pitch 0; attack 1; wait 5; pitch -0.5; wait 1; pitch 0; attack 0; move 1; wait 2", # attempt to destroy some obstacles
+#     "move 0; pitch 1; wait 2; pitch 0; use 1; jump 1; wait 6; use 0; jump 0; pitch -1; wait 1; pitch 0; wait 2; move 1; wait 2" # attempt to build tower under our feet
+# ]
+
 commandSequences=[
-    "jump 1; move 1; wait 1; jump 0; move 1; wait 2",   # attempt to jump over obstacle
-    "turn 0.5; wait 1; turn 0; move 1; wait 2",         # turn right a little
-    "turn -0.5; wait 1; turn 0; move 1; wait 2",        # turn left a little
-    "move 0; attack 1; wait 5; pitch 0.5; wait 1; pitch 0; attack 1; wait 5; pitch -0.5; wait 1; pitch 0; attack 0; move 1; wait 2", # attempt to destroy some obstacles
-    "move 0; pitch 1; wait 2; pitch 0; use 1; jump 1; wait 6; use 0; jump 0; pitch -1; wait 1; pitch 0; wait 2; move 1; wait 2" # attempt to build tower under our feet
-]
+    "jump 1", "jump 0", "move 1", "move 0", "turn 0.5", "turn -0.5", "turn 0",
+    "wait 1", "pitch 0.5", "pitch -0.5", "pitch 0", "jump 1", "jump 0", "use 1", "use 0",
+    "attack 1", "attack 0"]
+
 commandSequences = {i : command for i, command in enumerate(commandSequences)}
 
 my_mission = MalmoPython.MissionSpec(GetMissionXML(), True)
@@ -160,7 +170,7 @@ while world_state.is_mission_running:
             distTravelledAtLastCheck = dist
             timeStampAtLastCheck = timestamp
 
-    if waitCycles == 0:
+    if waitCycles <= 0:
         # if state has been changed
         if world_state.number_of_observations_since_last_state > 0:
             obvsText = world_state.observations[-1].text
@@ -182,7 +192,7 @@ while world_state.is_mission_running:
                 agent_host.sendCommand(command)    # Send the command to Minecraft.
 
     if currentSequence == "" and currentSpeed < 50 and waitCycles == 0\
-       and observation is not None and u'LineOfSight' in observation:
+       and observation is not None:
         reward = calc_reward(observation)
         while world_state.number_of_video_frames_since_last_state < 1:
             time.sleep(0.1)
