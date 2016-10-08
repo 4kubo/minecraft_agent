@@ -46,15 +46,6 @@ def GetMissionXML(width, height):
 
     </Mission>'''
 
-# Variety of strategies for dealing with loss of motion:
-# commandSequences=[
-#     "jump 1; move 1; wait 1; jump 0; move 1; wait 2",   # attempt to jump over obstacle
-#     "turn 0.5; wait 1; turn 0; move 1; wait 2",         # turn right a little
-#     "turn -0.5; wait 1; turn 0; move 1; wait 2",        # turn left a little
-#     "move 0; attack 1; wait 5; pitch 0.5; wait 1; pitch 0; attack 1; wait 5; pitch -0.5; wait 1; pitch 0; attack 0; move 1; wait 2", # attempt to destroy some obstacles
-#     "move 0; pitch 1; wait 2; pitch 0; use 1; jump 1; wait 6; use 0; jump 0; pitch -1; wait 1; pitch 0; wait 2; move 1; wait 2" # attempt to build tower under our feet
-# ]
-
 command_list=[
     "move 1", "move 0", "jump 1", "jump 0", "turn 0.5", "turn -0.5", "turn 0",
     "wait 1", "pitch 0.5", "pitch -0.5", "pitch 0", "jump 1", "jump 0", "use 1", "use 0",
@@ -71,15 +62,17 @@ class Main:
         self.video_height = 160
         self.dimention = 2
         # controls how quickly the agent responds to getting stuck, and the amount of time it waits for on a "wait" command.
-        self.cyclesPerCheck = 50000
-        self.app = QApplication([])
+        self.cyclesPerCheck = 10
+
 
         self.commandSequences = {i : command for i, command in enumerate(command_list)}
 
         my_mission = MalmoPython.MissionSpec(GetMissionXML(self.video_width, self.video_height), True)
 
         self.agent_host = MalmoPython.AgentHost()
+        self.agent_host.setObservationsPolicy(MalmoPython.ObservationsPolicy.LATEST_OBSERVATION_ONLY)
         self.agent_host.setVideoPolicy( MalmoPython.VideoPolicy.LATEST_FRAME_ONLY )
+
 
         agent = Agent(len(self.commandSequences), self.video_width, self.video_height,\
                       self.dimention)
@@ -145,26 +138,29 @@ class Main:
 
         if not world_state.is_mission_running:
             print 'Mission has already ended'
-            return 0 # mission already ended
+            return 0
 
         assert len(world_state.video_frames) > 0, 'No video frames!?'
 
-        # action = 0
         currentCycle = 0
         waitCycles = 1
 
-        # Main loop:
+        # main loop:
         print 'Start!'
 
-        # initialization
-        while world_state.number_of_video_frames_since_last_state < 1:
+        # nitialization
+        while world_state.number_of_video_frames_since_last_state < 1\
+              or len(world_state.video_frames) is 0:
             time.sleep(0.1)
             world_state = self.agent_host.getWorldState()
+
         raw_observation = world_state.video_frames[0].pixels
         observation = self.preprocess(raw_observation)
         agent_state = agent.get_initial_state(observation)
+        QApplication.processEvents()
 
         while world_state.is_mission_running:
+            world_state = self.agent_host.getWorldState()
             if world_state.number_of_observations_since_last_state > 0:
                 currentCycle += 1
                 if currentCycle == self.cyclesPerCheck:  # Time to check our speed and decrement our wait counter (if set):
@@ -173,12 +169,13 @@ class Main:
                         waitCycles -= 1
 
             if waitCycles <= 0:
-                if world_state.number_of_observations_since_last_state > 0:
-                    obvsText = world_state.observations[-1].text
-                    observation = json.loads(obvsText)
-
-                while len(world_state.video_frames) == 0:
+                while world_state.number_of_observations_since_last_state < 1\
+                   or len(world_state.video_frames) == 0:
+                    time.sleep(0.01)
                     world_state = self.agent_host.getWorldState()
+
+                obvsText = world_state.observations[-1].text
+                observation = json.loads(obvsText)
                 raw_observation = world_state.video_frames[0].pixels
 
                 reward = calc_reward(observation)
@@ -195,7 +192,7 @@ class Main:
                     waitCycles = 1
                     self.agent_host.sendCommand(command)    # Send the command to Minecraft.
 
-            # self.app.processEvents()
+            QApplication.processEvents()
 
 
     def preprocess(self, observation):
@@ -204,8 +201,6 @@ class Main:
             p_map = QPixmap.fromImage(p_img)
             self.label.setPixmap(p_map)
             self.label.update()
-            self.window.update()
-            self.app.processEvents()
 
         if self.dimention is 3:
             # observation = np.array(Image.frombytes('RGB',\
@@ -224,6 +219,7 @@ class Main:
 def calc_reward(observation):
     return 1.0
 
-# Mission has ended.
+
 if __name__ == '__main__':
+    app = QApplication([])
     main = Main()
