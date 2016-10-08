@@ -6,11 +6,10 @@ import json
 import numpy as np
 from PIL import Image
 from PyQt4.QtGui import QApplication, QWidget, QPixmap, QLabel, QImage
-# import cv2
 sys.path.append('/home/amamori/.local/lib/malmo/Malmo-0.17.0-Linux-Ubuntu-14.04-64bit/Python_Examples')
 
 from my_agent import Agent
-
+import arg_parsing
 
 def GetMissionXML(width, height):
     ''' Build an XML mission string that uses the DefaultWorldGenerator.'''
@@ -64,9 +63,16 @@ command_list=[
 
 class Main:
     def __init__(self):
+        option = arg_parsing.arg_parse()
+
+        max_retries = 1000
+
         self.video_width = 296
         self.video_height = 160
         self.dimention = 2
+        # controls how quickly the agent responds to getting stuck, and the amount of time it waits for on a "wait" command.
+        self.cyclesPerCheck = 50000
+        self.app = QApplication([])
 
         self.commandSequences = {i : command for i, command in enumerate(command_list)}
 
@@ -75,80 +81,93 @@ class Main:
         self.agent_host = MalmoPython.AgentHost()
         self.agent_host.setVideoPolicy( MalmoPython.VideoPolicy.LATEST_FRAME_ONLY )
 
-        try:
-            self.agent_host.parse( sys.argv )
-        except RuntimeError as e:
-            print 'ERROR:',e
-            print self.agent_host.getUsage()
-            exit(1)
-        if self.agent_host.receivedArgument("help"):
-            print self.agent_host.getUsage()
-            exit(0)
+        agent = Agent(len(self.commandSequences), self.video_width, self.video_height,\
+                      self.dimention)
 
-        if self.agent_host.receivedArgument("test"):
-            my_mission.timeLimitInSeconds(20) # else mission runs forever
+        for episode in xrange(max_retries):
+            # Attempt to start the mission:
+            print 'The agent is starting...'
+            max_retries = 3
+            for retry in xrange(max_retries):
+                try:
+                    self.agent_host.startMission( my_mission, MalmoPython.MissionRecordSpec() )
+                    break
+                except RuntimeError as e:
+                    if retry == max_retries - 1:
+                        print "Error starting mission",e
+                        print "Is the game running?"
+                        exit(1)
+                    else:
+                        time.sleep(2)
 
-        # Attempt to start the mission:
-        print 'The agent is starting...'
-        max_retries = 3
-        for retry in range(max_retries):
-            try:
-                self.agent_host.startMission( my_mission, MalmoPython.MissionRecordSpec() )
-                break
-            except RuntimeError as e:
-                if retry == max_retries - 1:
-                    print "Error starting mission",e
-                    print "Is the game running?"
-                    exit(1)
-                else:
-                    time.sleep(2)
-
-        # Wait for the mission to start:
-        world_state = self.agent_host.getWorldState()
-        while not world_state.has_mission_begun:
-            print '.',
-            time.sleep(0.1)
+            # Wait for the mission to start:
             world_state = self.agent_host.getWorldState()
+            while not world_state.has_mission_begun:
+                sys.stdout.write('.')
+                time.sleep(0.1)
+                world_state = self.agent_host.getWorldState()
+            print
 
-        # Prepare for monitoring
-        self.window = QWidget()
-        self.label = QLabel(self.window)
-        self.label.setPixmap(QPixmap.grabWidget(self.window,\
-                             0, 0, self.video_width, self.video_height))
-        self.window.setGeometry(0, 0, self.video_width, self.video_height)
-        self.window.resize(self.video_width, self.video_height)
-        self.window.show()
+            # Prepare for monitoring
+            if option.monitoring is True:
+                print 'Setting up monitor'
+                self.setup_monitor()
 
-        self.mainloop(world_state)
+            # Main loop
+            total_rewards = self.mainloop(agent)
+            print total_rewards
 
 
-    def mainloop(self, world_state):
+    def setup_monitor(self):
+        if not hasattr(self, 'window'):
+            self.window = QWidget()
+            self.label = QLabel(self.window)
+            self.label.setPixmap(QPixmap.grabWidget(self.window,\
+                                 0, 0, self.video_width, self.video_height))
+            self.window.setGeometry(0, 0, self.video_width, self.video_height)
+            self.window.resize(self.video_width, self.video_height)
+            self.window.show()
+
+
+    def mainloop(self, agent):
+        # wait for a valid observation
+        world_state = self.agent_host.peekWorldState()
+        while world_state.is_mission_running and all(e.text=='{}' for e in world_state.observations):
+            world_state = self.agent_host.peekWorldState()
+
+        # wait for a frame to arrive after that
+        num_frames_seen = world_state.number_of_video_frames_since_last_state
+        while world_state.is_mission_running and world_state.number_of_video_frames_since_last_state == num_frames_seen:
+            world_state = self.agent_host.peekWorldState()
+        world_state = self.agent_host.getWorldState()
+        for err in world_state.errors:
+            print err
+
+        if not world_state.is_mission_running:
+            print 'Mission has already ended'
+            return 0 # mission already ended
+
+        assert len(world_state.video_frames) > 0, 'No video frames!?'
+
         # action = 0
-        cyclesPerCheck = 10 # controls how quickly the agent responds to getting stuck, and the amount of time it waits for on a "wait" command.
         currentCycle = 0
         waitCycles = 1
-        is_started = False
 
         # Main loop:
-        print 'start!'
+        print 'Start!'
+
+        # initialization
+        while world_state.number_of_video_frames_since_last_state < 1:
+            time.sleep(0.1)
+            world_state = self.agent_host.getWorldState()
+        raw_observation = world_state.video_frames[0].pixels
+        observation = self.preprocess(raw_observation)
+        agent_state = agent.get_initial_state(observation)
 
         while world_state.is_mission_running:
-            world_state = self.agent_host.getWorldState()
-            # initialization
-            if not is_started:
-                while world_state.number_of_video_frames_since_last_state < 1:
-                    time.sleep(0.1)
-                    world_state = self.agent_host.getWorldState()
-                raw_observation = world_state.video_frames[0].pixels
-                observation = self.preprocess(raw_observation)
-                agent = Agent(len(self.commandSequences), self.video_width, self.video_height,\
-                              self.dimention)
-                agent_state = agent.get_initial_state(observation)
-                is_started = True
-
             if world_state.number_of_observations_since_last_state > 0:
                 currentCycle += 1
-                if currentCycle == cyclesPerCheck:  # Time to check our speed and decrement our wait counter (if set):
+                if currentCycle == self.cyclesPerCheck:  # Time to check our speed and decrement our wait counter (if set):
                     currentCycle = 0
                     if waitCycles > 0:
                         waitCycles -= 1
@@ -176,18 +195,17 @@ class Main:
                     waitCycles = 1
                     self.agent_host.sendCommand(command)    # Send the command to Minecraft.
 
-            QApplication.processEvents()
+            # self.app.processEvents()
 
 
     def preprocess(self, observation):
-        # image = np.array(Image.frombytes('RGB', (self.video_width, self.video_height), str(observation)))
-        # cv2.imshow('observation', image)
-        # cv2.waitKey(100)
-
-        p_img = QImage(str(observation),  self.video_width, self.video_height, self.video_width*3, QImage.Format_RGB888)
-        p_map = QPixmap.fromImage(p_img)
-        self.label.setPixmap(p_map)
-        self.label.update()
+        if hasattr(self, 'window'):
+            p_img = QImage(str(observation),  self.video_width, self.video_height, self.video_width*3, QImage.Format_RGB888)
+            p_map = QPixmap.fromImage(p_img)
+            self.label.setPixmap(p_map)
+            self.label.update()
+            self.window.update()
+            self.app.processEvents()
 
         if self.dimention is 3:
             # observation = np.array(Image.frombytes('RGB',\
@@ -208,5 +226,4 @@ def calc_reward(observation):
 
 # Mission has ended.
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
     main = Main()
