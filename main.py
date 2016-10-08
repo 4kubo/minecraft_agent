@@ -21,8 +21,15 @@ def GetMissionXML(width, height):
         </About>
 
         <ServerSection>
+            <ServerInitialConditions>
+                <Time>
+                    <AllowPassageOfTime>false</AllowPassageOfTime>
+                </Time>
+                <AllowSpawning>false</AllowSpawning>
+            </ServerInitialConditions>
             <ServerHandlers>
                 <DefaultWorldGenerator/>
+                <ServerQuitFromTimeUp timeLimitMs="300000"/>
             </ServerHandlers>
         </ServerSection>
 
@@ -30,7 +37,7 @@ def GetMissionXML(width, height):
             <Name>Rover</Name>
             <AgentStart>
                 <Inventory>
-                    <InventoryBlock slot="0" type="glowstone" quantity="63"/>
+                    <InventoryBlock slot="0" type="sand" quantity="64"/>
                 </Inventory>
             </AgentStart>
             <AgentHandlers>
@@ -53,10 +60,11 @@ command_list=[
 
 
 class Main:
-    def __init__(self):
-        option = arg_parsing.arg_parse()
+    def __init__(self, option):
+        self.opiton = option
 
-        max_retries = 1000
+        n_episode = 1000
+        max_retries = 3
 
         self.video_width = 296
         self.video_height = 160
@@ -77,7 +85,7 @@ class Main:
         agent = Agent(len(self.commandSequences), self.video_width, self.video_height,\
                       self.dimention)
 
-        for episode in xrange(max_retries):
+        for episode in xrange(n_episode):
             # Attempt to start the mission:
             print 'The agent is starting...'
             max_retries = 3
@@ -108,7 +116,7 @@ class Main:
 
             # Main loop
             total_rewards = self.mainloop(agent)
-            print total_rewards
+            print 'taotal reward at this episode :',total_rewards
 
 
     def setup_monitor(self):
@@ -149,15 +157,19 @@ class Main:
         print 'Start!'
 
         # nitialization
-        while world_state.number_of_video_frames_since_last_state < 1\
+        while world_state.number_of_observations_since_last_state < 1\
               or len(world_state.video_frames) is 0:
             time.sleep(0.1)
             world_state = self.agent_host.getWorldState()
 
-        raw_observation = world_state.video_frames[0].pixels
-        observation = self.preprocess(raw_observation)
+        obvs_text = world_state.observations[-1].text
+        observation = json.loads(obvs_text)
+        agent.y_pos = observation[u'YPos']
+        observation = self.preprocess(world_state)
         agent_state = agent.get_initial_state(observation)
-        QApplication.processEvents()
+
+        if hasattr(self, 'window'):
+            QApplication.processEvents()
 
         while world_state.is_mission_running:
             world_state = self.agent_host.getWorldState()
@@ -170,21 +182,19 @@ class Main:
 
             if waitCycles <= 0:
                 while world_state.number_of_observations_since_last_state < 1\
-                   or len(world_state.video_frames) == 0:
+                   or len(world_state.video_frames) is 0:
                     time.sleep(0.01)
                     world_state = self.agent_host.getWorldState()
 
-                obvsText = world_state.observations[-1].text
-                observation = json.loads(obvsText)
-                raw_observation = world_state.video_frames[0].pixels
-
-                reward = calc_reward(observation)
-                observation = self.preprocess(raw_observation)
+                observation = self.preprocess(world_state)
+                reward = calc_reward(world_state, agent)
                 action = agent.get_action(agent_state)
                 agent_state = agent.run(agent_state, action, reward, observation)
 
+                if agent.t % 100 == 0:
+                    print 'total reward :', agent.total_reward
+
                 command = self.commandSequences[action]
-                print command
                 verb,sep,param = command.partition(" ")
                 if verb == "wait":  # "wait" isn't a Malmo command - it's just used here to pause execution of our "programme".
                     waitCycles = int(param.strip())
@@ -192,34 +202,55 @@ class Main:
                     waitCycles = 1
                     self.agent_host.sendCommand(command)    # Send the command to Minecraft.
 
-            QApplication.processEvents()
+            if hasattr(self, 'window'):
+                QApplication.processEvents()
+
+        return agent.total_reward
 
 
-    def preprocess(self, observation):
+    def preprocess(self, world_state):
+        observation_img = world_state.video_frames[0].pixels
+        # for monitoring
         if hasattr(self, 'window'):
-            p_img = QImage(str(observation),  self.video_width, self.video_height, self.video_width*3, QImage.Format_RGB888)
+            p_img = QImage(str(observation_img),  self.video_width, self.video_height, self.video_width*3, QImage.Format_RGB888)
             p_map = QPixmap.fromImage(p_img)
             self.label.setPixmap(p_map)
             self.label.update()
 
         if self.dimention is 3:
-            # observation = np.array(Image.frombytes('RGB',\
-            #                     (self.video_width, self.video_height), str(observation)))
-            observation = np.array(observation, dtype=np.uint8)\
+            # observation_img = np.array(Image.frombytes('RGB',\
+            #                     (self.video_width, self.video_height), str(observation_img)))
+            observation_img = np.array(observation_img, dtype=np.uint8)\
                             .reshape((self.video_width, self.video_height, 3))
-            return observation.reshape(self.video_width, self.video_height, 3)
+            return observation_img.reshape(self.video_width, self.video_height, 3)
         elif self.dimention is 2:
-            observation = np.array(Image.frombytes('RGB',\
-                        (self.video_width, self.video_height), str(observation)).convert('L'))
-            return observation.reshape(self.video_width, self.video_height)
+            observation_img = np.array(Image.frombytes('RGB',\
+                        (self.video_width, self.video_height), str(observation_img)).convert('L'))
+            return observation_img.reshape(self.video_width, self.video_height)
         else:
             raise RuntimeError
 
 
-def calc_reward(observation):
-    return 1.0
+def calc_reward(world_state, agent):
+    obvs_text = world_state.observations[-1].text
+    observation = json.loads(obvs_text)
+
+    pos_reward = observation[u'YPos'] - agent.y_pos
+    # life_reward = observation[u'Life'] - 20.0
+    # food_reward = observation[u'Food'] - agent.food
+    # reward = life_reward + food_reward + pos_reward
+    reward = pos_reward
+
+    # updating agent state
+    agent.y_pos = observation[u'YPos']
+    agent.life = observation[u'Life']
+    agent.food = observation[u'Food']
+
+    return reward
 
 
 if __name__ == '__main__':
-    app = QApplication([])
-    main = Main()
+    option = arg_parsing.arg_parse()
+    if option.monitoring is True:
+        app = QApplication([])
+    main = Main(option)

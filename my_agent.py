@@ -5,25 +5,25 @@ import numpy as np
 import tensorflow as tf
 from collections import deque
 from keras.models import Sequential
-from keras.layers import Convolution3D, Convolution2D, Flatten, Dense
+from keras.layers import Convolution3D, Convolution2D, Flatten, Dense, Merge
 
 
 NUM_EPISODES = 12000  # Number of episodes the agent plays
 STATE_LENGTH = 2  # Number of most recent frames to produce the input to the network
 GAMMA = 0.99  # Discount factor
-EXPLORATION_STEPS = 1000000  # Number of steps over which the initial value of epsilon is linearly annealed to its final value
+EXPLORATION_STEPS = 1000  # Number of steps over which the initial value of epsilon is linearly annealed to its final value
 INITIAL_EPSILON = 1.0  # Initial value of epsilon in epsilon-greedy
 FINAL_EPSILON = 0.1  # Final value of epsilon in epsilon-greedy
-INITIAL_REPLAY_SIZE = 20000  # Number of steps to populate the replay memory before training starts
-NUM_REPLAY_MEMORY = 400000  # Number of replay memory the agent uses for training
+INITIAL_REPLAY_SIZE = 500  # Number of steps to populate the replay memory before training starts
+NUM_REPLAY_MEMORY = 1000  # Number of replay memory the agent uses for training
 BATCH_SIZE = 32  # Mini batch size
-TARGET_UPDATE_INTERVAL = 10000  # The frequency with which the target network is updated
+TARGET_UPDATE_INTERVAL = 200  # The frequency with which the target network is updated
 ACTION_INTERVAL = 4  # The agent sees only every 4th input
-TRAIN_INTERVAL = 4  # The agent selects 4 actions between successive updates
+TRAIN_INTERVAL = 10  # The agent selects 4 actions between successive updates
 LEARNING_RATE = 0.00025  # Learning rate used by RMSProp
 MOMENTUM = 0.95  # Momentum used by RMSProp
 MIN_GRAD = 0.01  # Constant added to the squared gradient in the denominator of the RMSProp update
-SAVE_INTERVAL = 300000  # The frequency with which the network is saved
+SAVE_INTERVAL = 3000  # The frequency with which the network is saved
 NO_OP_STEPS = 30  # Maximum number of "do nothing" actions to be performed by the agent at the start of an episode
 LOAD_NETWORK = False
 TRAIN = True
@@ -40,6 +40,9 @@ class Agent():
         self.epsilon_step = (INITIAL_EPSILON - FINAL_EPSILON) / EXPLORATION_STEPS
         self.t = 0
         self.repeated_action = 0
+
+        self.life = 20
+        self.food = 20
 
         # Parameters used for summary
         self.total_reward = 0
@@ -84,26 +87,38 @@ class Agent():
         self.sess.run(self.update_target_network)
 
     def build_network(self):
-        model = Sequential()
+        model_cnn = Sequential()
         if self.dimention is 3:
-            model.add(Convolution3D(32, STATE_LENGTH, 8, 8, subsample=(STATE_LENGTH, 2, 2), activation='relu',
-                                    border_mode='valid', input_shape=(STATE_LENGTH, self.video_width, self.video_height, 3)))
+            model_cnn.add(Convolution3D(32, STATE_LENGTH, 8, 8,
+                                    subsample=(STATE_LENGTH, 2, 2),
+                                    activation='relu',
+                                    border_mode='valid',
+                                    input_shape=(STATE_LENGTH,
+                                                 self.video_width,
+                                                 self.video_height,
+                                                 3)))
         elif self.dimention is 2:
-            model.add(Convolution2D(32, 8, 8, subsample=(4, 4), activation='relu',
-                                    border_mode='valid', input_shape=(self.video_width, self.video_height, STATE_LENGTH)))
+            model_cnn.add(Convolution2D(32, 8, 8,
+                                    subsample=(4, 4),
+                                    activation='relu',
+                                    border_mode='valid',
+                                    input_shape=(self.video_width,
+                                                 self.video_height,
+                                                 STATE_LENGTH)))
         else:
             raise RuntimeError
-        model.add(Flatten())
-        model.add(Dense(512, activation='relu'))
-        model.add(Dense(self.num_actions))
+        model_cnn.add(Flatten())
+        model_cnn.add(Dense(512, activation='relu'))
+        model_cnn.add(Dense(self.num_actions))
 
         if self.dimention is 3:
             s = tf.placeholder(tf.float32, [None, STATE_LENGTH, self.video_width, self.video_height, 3])
         elif self.dimention is 2:
             s = tf.placeholder(tf.float32, [None, self.video_width, self.video_height, STATE_LENGTH])
-        q_values = model(s)
+        q_values = model_cnn(s)
 
-        return s, q_values, model
+        return s, q_values, model_cnn
+
 
     def build_training_op(self, q_network_weights):
         a = tf.placeholder(tf.int64, [None])
@@ -151,6 +166,7 @@ class Agent():
         return action
 
     def run(self, state, action, reward, observation):
+        if self.t % 100 == 0: print self.t
         if self.dimention is 3:
             observation = observation.reshape(1, self.video_width, self.video_height, 3)
             next_state = np.append(state[1:, :, :, :], observation, axis=0)
@@ -158,8 +174,8 @@ class Agent():
             observation = observation.reshape(self.video_width, self.video_height, 1)
             next_state = np.append(state[:, :, 1:], observation, axis=2)
 
-        # Clip all positive rewards at 1 and all negative rewards at -1, leaving 0 rewards unchanged
-        reward = np.sign(reward)
+        # # Clip all positive rewards at 1 and all negative rewards at -1, leaving 0 rewards unchanged
+        # reward = np.sign(reward)
 
         # Store transition in replay memory
         self.replay_memory.append((state, action, reward, next_state))
@@ -236,13 +252,14 @@ class Agent():
             action_batch.append(data[1])
             reward_batch.append(data[2])
             next_state_batch.append(data[3])
-            terminal_batch.append(data[4])
+            # terminal_batch.append(data[4])
 
         # Convert True to 1, False to 0
-        terminal_batch = np.array(terminal_batch) + 0
+        # terminal_batch = np.array(terminal_batch) + 0
 
         target_q_values_batch = self.target_q_values.eval(feed_dict={self.st: np.float32(np.array(next_state_batch) / 255.0)})
-        y_batch = reward_batch + (1 - terminal_batch) * GAMMA * np.max(target_q_values_batch, axis=1)
+        # y_batch = reward_batch + (1 - terminal_batch) * GAMMA * np.max(target_q_values_batch, axis=1)
+        y_batch = reward_batch + GAMMA * np.max(target_q_values_batch, axis=1)
 
         loss, _ = self.sess.run([self.loss, self.grad_update], feed_dict={
             self.s: np.float32(np.array(state_batch) / 255.0),
