@@ -62,18 +62,18 @@ command_list=[
 class Main:
     def __init__(self, option):
         self.opiton = option
-
-        n_episode = 1000
-        max_retries = 3
-
         self.video_width = 296
         self.video_height = 160
         self.dimention = 2
         # controls how quickly the agent responds to getting stuck, and the amount of time it waits for on a "wait" command.
         self.cyclesPerCheck = 10
-
-
+        self.state_list = [u'Yaw', u'Pitch']
         self.commandSequences = {i : command for i, command in enumerate(command_list)}
+        self.agent_state_dict = {verb : 0.0 for verb
+                                 in set(command.split(' ')[0] for command in command_list)}
+        n_episode = 1000
+        max_retries = 5
+        num_state = len(self.state_list) + len(self.agent_state_dict)
 
         my_mission = MalmoPython.MissionSpec(GetMissionXML(self.video_width, self.video_height), True)
 
@@ -82,7 +82,7 @@ class Main:
         self.agent_host.setVideoPolicy( MalmoPython.VideoPolicy.LATEST_FRAME_ONLY )
 
 
-        agent = Agent(len(self.commandSequences), self.video_width, self.video_height,\
+        agent = Agent(len(self.commandSequences), num_state, self.video_width, self.video_height,\
                       self.dimention)
 
         for episode in xrange(n_episode):
@@ -116,7 +116,7 @@ class Main:
 
             # Main loop
             total_rewards = self.mainloop(agent)
-            print 'taotal reward at this episode :',total_rewards
+            print 'taotal reward at episode {1} : {0:.3}'.format(total_rewards, episode)
 
 
     def setup_monitor(self):
@@ -133,14 +133,8 @@ class Main:
     def mainloop(self, agent):
         # wait for a valid observation
         world_state = self.agent_host.peekWorldState()
-        while world_state.is_mission_running and all(e.text=='{}' for e in world_state.observations):
-            world_state = self.agent_host.peekWorldState()
+        world_state = self.preprocess(world_state)
 
-        # wait for a frame to arrive after that
-        num_frames_seen = world_state.number_of_video_frames_since_last_state
-        while world_state.is_mission_running and world_state.number_of_video_frames_since_last_state == num_frames_seen:
-            world_state = self.agent_host.peekWorldState()
-        world_state = self.agent_host.getWorldState()
         for err in world_state.errors:
             print err
 
@@ -156,23 +150,19 @@ class Main:
         # main loop:
         print 'Start!'
 
-        # nitialization
-        while world_state.number_of_observations_since_last_state < 1\
-              or len(world_state.video_frames) is 0:
-            time.sleep(0.1)
-            world_state = self.agent_host.getWorldState()
-
+        # initialization
+        action = 1
         obvs_text = world_state.observations[-1].text
         observation = json.loads(obvs_text)
         agent.y_pos = observation[u'YPos']
-        observation = self.preprocess(world_state)
-        agent_state = agent.get_initial_state(observation)
+        agent_state, obsv_image = self.get_agent_state(world_state, action)
+        state_context = agent.get_initial_state(obsv_image)
 
         if hasattr(self, 'window'):
             QApplication.processEvents()
 
         while world_state.is_mission_running:
-            world_state = self.agent_host.getWorldState()
+            world_state = self.preprocess(world_state)
             if world_state.number_of_observations_since_last_state > 0:
                 currentCycle += 1
                 if currentCycle == self.cyclesPerCheck:  # Time to check our speed and decrement our wait counter (if set):
@@ -181,15 +171,10 @@ class Main:
                         waitCycles -= 1
 
             if waitCycles <= 0:
-                while world_state.number_of_observations_since_last_state < 1\
-                   or len(world_state.video_frames) is 0:
-                    time.sleep(0.01)
-                    world_state = self.agent_host.getWorldState()
-
-                observation = self.preprocess(world_state)
+                agent_state, obsv_image = self.get_agent_state(world_state, action)
                 reward = calc_reward(world_state, agent)
-                action = agent.get_action(agent_state)
-                agent_state = agent.run(agent_state, action, reward, observation)
+                action = agent.get_action(state_context, agent_state)
+                state_context = agent.run(state_context, action, reward, obsv_image, agent_state)
 
                 if agent.t % 100 == 0:
                     print 'total reward :', agent.total_reward
@@ -209,6 +194,35 @@ class Main:
 
 
     def preprocess(self, world_state):
+        while world_state.is_mission_running and all(e.text=='{}' for e in world_state.observations):
+            world_state = self.agent_host.peekWorldState()
+
+        # wait for a frame to arrive after that
+        num_frames_seen = world_state.number_of_video_frames_since_last_state
+        while world_state.is_mission_running and world_state.number_of_video_frames_since_last_state == num_frames_seen:
+            world_state = self.agent_host.peekWorldState()
+        world_state = self.agent_host.getWorldState()
+        return world_state
+
+
+    def get_state_array(self, action):
+        command = self.commandSequences[action]
+        verb, param = command.split(' ')
+        self.agent_state_dict[verb] = float(param)
+        if verb != "wait":
+            self.agent_state_dict["wait"] = 0.0
+        return self.agent_state_dict.values()
+
+
+    def get_agent_state(self, world_state, action):
+        obvs_text = world_state.observations[-1].text
+        observation = json.loads(obvs_text)
+        state_array = self.get_state_array(action)
+        # one_hot vector
+        state_array = state_array + [observation[attr] for attr in self.state_list]
+        agent_state = np.array(state_array)
+
+        # getting perceived image
         observation_img = world_state.video_frames[0].pixels
         # for monitoring
         if hasattr(self, 'window'):
@@ -226,7 +240,8 @@ class Main:
         elif self.dimention is 2:
             observation_img = np.array(Image.frombytes('RGB',\
                         (self.video_width, self.video_height), str(observation_img)).convert('L'))
-            return observation_img.reshape(self.video_width, self.video_height)
+            observation_img = observation_img.reshape(self.video_width, self.video_height)
+            return agent_state, observation_img
         else:
             raise RuntimeError
 
@@ -236,16 +251,10 @@ def calc_reward(world_state, agent):
     observation = json.loads(obvs_text)
 
     pos_reward = observation[u'YPos'] - agent.y_pos
-    # life_reward = observation[u'Life'] - 20.0
-    # food_reward = observation[u'Food'] - agent.food
-    # reward = life_reward + food_reward + pos_reward
     reward = pos_reward
 
     # updating agent state
     agent.y_pos = observation[u'YPos']
-    agent.life = observation[u'Life']
-    agent.food = observation[u'Food']
-
     return reward
 
 
